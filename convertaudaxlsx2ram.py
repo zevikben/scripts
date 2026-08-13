@@ -14,8 +14,13 @@ own account codes / order type.
 
 Base directory: c:\\veka\\scr
     - the template file "income_base_template.xls" must live there
-    - relative input/output paths given on the command line are resolved
-      against this directory too
+
+Data directory: c:\\veka\\datafiles
+    - relative INPUT and OUTPUT paths given on the command line are both
+      resolved against this directory (created automatically for the
+      output side if it doesn't exist)
+    - pass an absolute path for either one to override this and use a
+      different location
 
 NOTE ON FILE FORMATS
     - The TEMPLATE and OUTPUT are genuine legacy .xls files (BIFF format),
@@ -32,16 +37,28 @@ Template rules
       matter as long as the header text matches.
 
 Filter condition
-    Only input rows where סוג מסמך == "חשבונית מס-קבלה" (exact match) are
-    processed. All other rows (e.g. subtotal/summary rows like
-    "סך (חשבונית מס-קבלה)" or "סך הכנסות") are skipped entirely.
+    Input rows are processed when סוג מסמך is one of:
+      - "חשבונית מס-קבלה" (exact match) - always processed, uses the
+        default קוד חשבון חובה = 21001.
+      - "חשבונית מס" or "חשבונית זיכוי" - processed ONLY when שם (the
+        client name) is one of two specific colleges, which also
+        determines the קוד חשבון חובה used for that row instead of the
+        default:
+            "המכללה למנהל/רשת בתי-ספר להנדסאים"  -> קוד חשבון חובה = 21011
+            "המכללה האקדמית גליל מערבי"           -> קוד חשבון חובה = 21014
+        Rows with these two doc types but a different/blank שם are
+        filtered out, same as any other unrecognized row.
+    All other rows (e.g. subtotal/summary rows like "סך (חשבונית מס-קבלה)"
+    or "סך הכנסות") are skipped entirely.
 
 Column mapping (input -> output), for rows that pass the filter
     מספר מסמך          -> אסמכתא
     שם                 -> תאור
     תאריך הפקה          -> תאריך            (parsed and written as a real date, formatted as date)
     תאריך הפקה          -> תאריך ערך         (same source column as above, per spec)
-    (constant)         -> קוד חשבון חובה  = 21001, every row
+    (constant/lookup)  -> קוד חשבון חובה  = 21001 by default, or 21011 / 21014
+                          for the two special colleges above (see Filter
+                          condition)
     (constant)         -> קוד חשבון זכות  = 71001, every row
     (parameter)        -> מספר מנה        = the batch number given on the command line
     סה"כ לתשלום         -> סך פקודה
@@ -74,15 +91,25 @@ from xlutils.copy import copy as xl_copy
 # ---------------------------------------------------------------------------
 BASE_DIR = r"c:\veka\scr"
 TEMPLATE_NAME = "income_base_template.xls"
+DATA_DIR = r"c:\veka\datafiles"
 
 DATA_START_ROW = 5  # 1-indexed, matching the spec: rows 1-4 untouched
 
-DEBIT_ACCOUNT_CODE = 21001
+DEBIT_ACCOUNT_CODE = 21001  # default, used for DOC_TYPE_FILTER_VALUE rows
 CREDIT_ACCOUNT_CODE = 71001
 ORDER_TYPE = "חמ8"
 
 DOC_TYPE_FILTER_COLUMN = 'סוג מסמך'
 DOC_TYPE_FILTER_VALUE = 'חשבונית מס-קבלה'
+
+# Additional doc types that are only processed for two specific customers,
+# each with their own קוד חשבון חובה instead of the DEBIT_ACCOUNT_CODE default.
+CLIENT_NAME_COLUMN = 'שם'
+DOC_TYPES_WITH_CLIENT_OVERRIDE = ('חשבונית מס', 'חשבונית זיכוי')
+CLIENT_DEBIT_ACCOUNT_OVERRIDES = {
+    'המכללה למנהל/רשת בתי-ספר להנדסאים': 21011,
+    'המכללה האקדמית גליל מערבי': 21014,
+}
 
 DEFAULT_DATE_FORMAT = "DD/MM/YYYY"
 DATE_STRING_FORMATS = (
@@ -108,6 +135,27 @@ def parse_date_value(value):
         except ValueError:
             continue
     return None  # unparseable - caller decides how to handle
+
+
+def fix_swapped_native_date(value):
+    """Known bug in the audaincome exporter: for some rows, תאריך הפקה is
+    written as a genuine Excel date object (not text) with the day and
+    month swapped - this happens specifically whenever the intended day
+    (1-12) is also a valid month number, so Excel silently accepts the
+    swapped value as a real date instead of erroring out. Text-format
+    dates in the same column are NOT affected by this bug and are left
+    alone (parse_date_value already handles those correctly).
+
+    Confirmed against a real export: the affected rows form a perfect
+    day-by-day sequence within the batch's actual month once swapped back
+    (e.g. stored Jan7/Feb7/.../Dec7 -> swapped July1/July2/.../July12),
+    while unaffected rows (day > 12, always stored as text) were already
+    correct. Only native datetime/date values with day <= 12 are swapped;
+    everything else (including all text dates) passes through unchanged.
+    """
+    if isinstance(value, (datetime.date, datetime.datetime)) and value.day <= 12:
+        return value.replace(day=value.month, month=value.day)
+    return value
 
 
 INPUT_HEADERS = {
@@ -193,6 +241,20 @@ def resolve_path(path_arg):
     return path_arg if os.path.isabs(path_arg) else os.path.join(BASE_DIR, path_arg)
 
 
+def resolve_data_path(path_arg, create_dir=False):
+    """Resolve an input/output data file against DATA_DIR (c:\\veka\\datafiles)
+    unless it's already absolute. If create_dir is True, DATA_DIR is created
+    when missing (used for the output file - we're about to write there).
+    For the input file we leave create_dir False, since a missing DATA_DIR
+    in that case just means the input file itself won't be found, which is
+    reported clearly by the existence check right after."""
+    if os.path.isabs(path_arg):
+        return path_arg
+    if create_dir:
+        os.makedirs(DATA_DIR, exist_ok=True)
+    return os.path.join(DATA_DIR, path_arg)
+
+
 def parse_batch_no(raw):
     """Keep the batch number numeric if it looks numeric, else keep it as text."""
     try:
@@ -212,8 +274,8 @@ def main():
     if os.path.isdir(BASE_DIR):
         os.chdir(BASE_DIR)
 
-    input_path = resolve_path(input_arg)
-    output_path = resolve_path(output_arg)
+    input_path = resolve_data_path(input_arg)
+    output_path = resolve_data_path(output_arg, create_dir=True)
     template_path = resolve_path(TEMPLATE_NAME)
 
     if not os.path.exists(template_path):
@@ -257,7 +319,8 @@ def main():
     max_row = in_ws.max_row
     out_row_1idx = DATA_START_ROW
     rows_written = 0
-    filtered_out = 0
+    blank_rows = []      # row numbers skipped: no סוג מסמך at all
+    filtered_rows = []   # (row number, actual סוג מסמך value, reason or None) skipped
     unparseable_dates = 0
 
     def gv(row, key):
@@ -266,18 +329,34 @@ def main():
     for r in range(in_header_row + 1, max_row + 1):
         doc_type = gv(r, "doc_type")
         if doc_type is None:
+            blank_rows.append(r)
             continue  # blank row - skip silently
 
-        # --- filter: only process the target document type ---
-        if str(doc_type).strip() != DOC_TYPE_FILTER_VALUE:
-            filtered_out += 1
+        doc_type_text = str(doc_type).strip()
+        client = gv(r, "client")
+        client_text = str(client).strip() if client is not None else ""
+
+        # --- filter: which doc types are processed, and which קוד חשבון
+        #     חובה applies to this row ---
+        if doc_type_text == DOC_TYPE_FILTER_VALUE:
+            debit_account_code = DEBIT_ACCOUNT_CODE
+        elif doc_type_text in DOC_TYPES_WITH_CLIENT_OVERRIDE:
+            if client_text in CLIENT_DEBIT_ACCOUNT_OVERRIDES:
+                debit_account_code = CLIENT_DEBIT_ACCOUNT_OVERRIDES[client_text]
+            else:
+                reason = (f"סוג מסמך '{doc_type_text}' אך {CLIENT_NAME_COLUMN} "
+                           f"'{client_text or '(ריק)'}' אינו אחד משני הלקוחות המוכרים עבור סוג מסמך זה")
+                filtered_rows.append((r, doc_type_text, reason))
+                continue
+        else:
+            filtered_rows.append((r, doc_type_text, None))
             continue
 
         doc_no = gv(r, "doc_no")
-        client = gv(r, "client")
         total_payable = gv(r, "total_payable")
 
         issue_date_raw = gv(r, "issue_date")
+        issue_date_raw = fix_swapped_native_date(issue_date_raw)
         issue_date = parse_date_value(issue_date_raw)
         if issue_date_raw not in (None, "") and issue_date is None:
             unparseable_dates += 1
@@ -289,7 +368,7 @@ def main():
         out_ws.write(out_row_0idx, out_cols["description"], client, plain_style)
         out_ws.write(out_row_0idx, out_cols["date"], issue_date, date_style)
         out_ws.write(out_row_0idx, out_cols["value_date"], issue_date, date_style)  # same source column
-        out_ws.write(out_row_0idx, out_cols["debit_account"], DEBIT_ACCOUNT_CODE, plain_style)
+        out_ws.write(out_row_0idx, out_cols["debit_account"], debit_account_code, plain_style)
         out_ws.write(out_row_0idx, out_cols["credit_account"], CREDIT_ACCOUNT_CODE, plain_style)
         out_ws.write(out_row_0idx, out_cols["batch_no"], batch_no, plain_style)
         out_ws.write(out_row_0idx, out_cols["order_sum"], total_payable, plain_style)
@@ -302,7 +381,21 @@ def main():
 
     print(f"Done: {output_path}")
     print(f"  rows written: {rows_written}")
-    print(f"  filtered out (not '{DOC_TYPE_FILTER_VALUE}'): {filtered_out}")
+
+    print(f"  filtered out (doc type / client not recognized): {len(filtered_rows)}")
+    if filtered_rows:
+        for row, actual_value, reason in filtered_rows:
+            shown_value = actual_value if actual_value else "(empty)"
+            if reason:
+                print(f"    row {row}: {DOC_TYPE_FILTER_COLUMN} = '{shown_value}' - {reason}")
+            else:
+                print(f"    row {row}: {DOC_TYPE_FILTER_COLUMN} = '{shown_value}'")
+
+    if blank_rows:
+        print(f"  skipped {len(blank_rows)} row(s) with no {DOC_TYPE_FILTER_COLUMN} value at all "
+              f"(blank row):")
+        print("    rows: " + ", ".join(str(r) for r in blank_rows))
+
     if unparseable_dates:
         print(f"  WARNING: {unparseable_dates} date value(s) could not be parsed and were "
               f"copied through as-is (may not display as a proper date in the output)")

@@ -13,8 +13,13 @@ one-row-per-input-row logic (no rule a/b/c branching or duplication).
 
 Base directory: c:\\veka\\scr
     - the template file "income_base_template.xls" must live there
-    - relative input/output paths given on the command line are resolved
-      against this directory too
+
+Data directory: c:\\veka\\datafiles
+    - relative INPUT and OUTPUT paths given on the command line are both
+      resolved against this directory (created automatically for the
+      output side if it doesn't exist)
+    - pass an absolute path for either one to override this and use a
+      different location
 
 NOTE ON FILE FORMATS
     - The TEMPLATE and OUTPUT are genuine legacy .xls files (BIFF format),
@@ -69,6 +74,7 @@ from xlutils.copy import copy as xl_copy
 # ---------------------------------------------------------------------------
 BASE_DIR = r"c:\veka\scr"
 TEMPLATE_NAME = "income_base_template.xls"
+DATA_DIR = r"c:\veka\datafiles"
 
 DATA_START_ROW = 5  # 1-indexed, matching the spec: rows 1-4 untouched
 
@@ -185,6 +191,20 @@ def resolve_path(path_arg):
     return path_arg if os.path.isabs(path_arg) else os.path.join(BASE_DIR, path_arg)
 
 
+def resolve_data_path(path_arg, create_dir=False):
+    """Resolve an input/output data file against DATA_DIR (c:\\veka\\datafiles)
+    unless it's already absolute. If create_dir is True, DATA_DIR is created
+    when missing (used for the output file - we're about to write there).
+    For the input file we leave create_dir False, since a missing DATA_DIR
+    in that case just means the input file itself won't be found, which is
+    reported clearly by the existence check right after."""
+    if os.path.isabs(path_arg):
+        return path_arg
+    if create_dir:
+        os.makedirs(DATA_DIR, exist_ok=True)
+    return os.path.join(DATA_DIR, path_arg)
+
+
 def parse_batch_no(raw):
     """Keep the batch number numeric if it looks numeric, else keep it as text."""
     try:
@@ -204,8 +224,8 @@ def main():
     if os.path.isdir(BASE_DIR):
         os.chdir(BASE_DIR)
 
-    input_path = resolve_path(input_arg)
-    output_path = resolve_path(output_arg)
+    input_path = resolve_data_path(input_arg)
+    output_path = resolve_data_path(output_arg, create_dir=True)
     template_path = resolve_path(TEMPLATE_NAME)
 
     if not os.path.exists(template_path):
@@ -231,6 +251,20 @@ def main():
     date_style = xlwt.XFStyle()
     date_style.num_format_str = DEFAULT_DATE_FORMAT
     plain_style = xlwt.XFStyle()
+    blank_style = xlwt.XFStyle()
+
+    # --- wipe any stale content sitting in the data area of the template ---
+    # xlutils.copy() carries EVERY cell from the template through untouched,
+    # including columns we never write to (e.g. אסמכתא2, סך פרודה במט"ח,
+    # סוג מטבע) and rows left over from a previous, longer run (if the
+    # template file was ever itself a generated output that got reused as
+    # the template). We only ever write into the specific OUTPUT_HEADERS
+    # columns below, so without this pass any old values/formatting sitting
+    # in other columns or trailing rows would leak straight through into
+    # the new output.
+    for r0 in range(DATA_START_ROW - 1, template_sheet.nrows):
+        for c0 in range(template_sheet.ncols):
+            out_ws.write(r0, c0, "", blank_style)
 
     # --- read the input workbook (still modern .xlsx via openpyxl) ---
     in_wb = openpyxl.load_workbook(input_path, data_only=True)

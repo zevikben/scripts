@@ -9,8 +9,13 @@ target template.
 
 Base directory: c:\\veka\\scr
     - the template file "income_base_template.xls" must live there
-    - relative input/output paths given on the command line are resolved
-      against this directory too
+
+Data directory: c:\\veka\\datafiles
+    - relative INPUT and OUTPUT paths given on the command line are both
+      resolved against this directory (created automatically for the
+      output side if it doesn't exist)
+    - pass an absolute path for either one to override this and use a
+      different location
 
 NOTE ON FILE FORMATS
     - The TEMPLATE and OUTPUT are now genuine legacy .xls files (BIFF
@@ -71,6 +76,7 @@ from xlutils.copy import copy as xl_copy
 # ---------------------------------------------------------------------------
 BASE_DIR = r"c:\veka\scr"
 TEMPLATE_NAME = "income_base_template.xls"
+DATA_DIR = r"c:\veka\datafiles"
 
 DATA_START_ROW = 5  # 1-indexed, matching the original spec: rows 1-4 untouched
 
@@ -191,6 +197,20 @@ def resolve_path(path_arg):
     return path_arg if os.path.isabs(path_arg) else os.path.join(BASE_DIR, path_arg)
 
 
+def resolve_data_path(path_arg, create_dir=False):
+    """Resolve an input/output data file against DATA_DIR (c:\\veka\\datafiles)
+    unless it's already absolute. If create_dir is True, DATA_DIR is created
+    when missing (used for the output file - we're about to write there).
+    For the input file we leave create_dir False, since a missing DATA_DIR
+    in that case just means the input file itself won't be found, which is
+    reported clearly by the existence check right after."""
+    if os.path.isabs(path_arg):
+        return path_arg
+    if create_dir:
+        os.makedirs(DATA_DIR, exist_ok=True)
+    return os.path.join(DATA_DIR, path_arg)
+
+
 def parse_batch_no(raw):
     """Keep the batch number numeric if it looks numeric, else keep it as text."""
     try:
@@ -210,8 +230,8 @@ def main():
     if os.path.isdir(BASE_DIR):
         os.chdir(BASE_DIR)
 
-    input_path = resolve_path(input_arg)
-    output_path = resolve_path(output_arg)
+    input_path = resolve_data_path(input_arg)
+    output_path = resolve_data_path(output_arg, create_dir=True)
     template_path = resolve_path(TEMPLATE_NAME)
 
     if not os.path.exists(template_path):
