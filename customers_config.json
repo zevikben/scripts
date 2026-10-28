@@ -1,0 +1,7 @@
+{
+  "_comment": "Map each customer name (as it will appear in the dropdown) to the .py conversion script that should run for them. Add a new line for every new customer - no code changes needed. Script names are resolved relative to BASE_DIR (c:\\veka\\scr) unless given as a full path.",
+  "אביר": "convertabirxlsx2ram.py",
+  "איודה": "convertaudaxlsx2ram.py",
+  "חשבונית ירוקה": "converthyxlsx2ram.py",
+  "רוני גילוני": "convertronigxlsx2ram.py"
+}
